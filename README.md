@@ -1,6 +1,6 @@
 # lidarr-mcp
 
-Part of the [arr-mcps](https://github.com/SavageCore/arr-mcps) collection.
+Part of the [arr-mcps](https://github.com/arr-mcps/arr-mcps) collection.
 MCP server exposing [Lidarr](https://lidarr.audio)'s v1 REST API
 ([OpenAPI 3.0.4](https://lidarr.audio/docs/api/)) as tools, so an LLM can read
 and manage a Lidarr instance: artists, albums, tracks, track files, the
@@ -17,7 +17,7 @@ Generate one in Lidarr **Settings > General > Security**. Auth is the
 
 ## Install
 
-Download a wheel from the [latest release](https://github.com/SavageCore/lidarr-mcp/releases/latest)
+Download a wheel from the [latest release](https://github.com/arr-mcps/lidarr-mcp/releases/latest)
 and install it as a `uv` tool (no repo checkout needed):
 
 ```bash
@@ -107,7 +107,7 @@ make help  # list all commands
 | `make clean` | Remove build artifacts |
 
 The release workflow (`.github/workflows/release.yml`) builds and publishes to
-[Releases](https://github.com/SavageCore/lidarr-mcp/releases) whenever a `v*`
+[Releases](https://github.com/arr-mcps/lidarr-mcp/releases) whenever a `v*`
 tag is pushed - so the usual flow is `make bump-patch`, commit, then tag and
 push.
 
