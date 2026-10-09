@@ -9,6 +9,7 @@ https://gofastmcp.com/development/tests).
 """
 
 import json
+import ast
 import os
 
 import httpx
@@ -166,6 +167,86 @@ async def test_unknown_operation_rejected_by_schema(server):
 
 
 # --- query params --------------------------------------------------------------
+
+def spec_query_defaults():
+    """(method, path) -> {wire_name: schema} for every query param in the spec."""
+    d = json.load(open(SPEC_PATH))
+    out = {}
+    for path, methods in d["paths"].items():
+        for method, op in methods.items():
+            if method in ("head", "parameters"):
+                continue
+            out[(method.upper(), path)] = {
+                p["name"]: (p.get("schema") or {})
+                for p in op.get("parameters", [])
+                if p.get("in") == "query"
+            }
+    return out
+
+
+def _effective_declared(raw):
+    """Map a registry default snippet to what `_omit` actually sends.
+
+    `_omit` drops values that are `""` or `None`, so those are equivalent to
+    omitting the param; everything else (`False` included) is sent as-is.
+    """
+    value = ast.literal_eval(raw) if isinstance(raw, str) else raw
+    return None if value in (None, "") else value
+
+
+def test_registry_query_defaults_match_spec():
+    """Every *spec-declared* query-param default must match the vendored spec.
+
+    Guards the regression where all boolean params were generated with a
+    hardcoded `False`, silently overriding API defaults that are `true`
+    (e.g. wanted/missing `monitored`, queue `removeFromClient`).
+
+    Params the spec gives no default for are deliberately not asserted here:
+    they keep `False`, which matches the API's binding for plain filters and is
+    required for params in an undocumented any-one-of group.
+    """
+    spec_defaults = spec_query_defaults()
+    drift = []
+    for spec in lidarr_mcp._TOOL_REGISTRY:
+        available = spec_defaults.get((spec["method"], spec["path"]), {})
+        for q in spec.get("qp", []):
+            schema = available.get(q["wire"])
+            if schema is None or "default" not in schema:
+                continue
+            declared = _effective_declared(q["default"])
+            # An empty spec default (`''`) and no default are both "omit" in
+            # sent-value terms; only `True`/`False` defaults are meaningful.
+            expected = schema["default"]
+            expected = None if expected in (None, "") else expected
+            if declared != expected:
+                drift.append(
+                    f"{spec['name']}.{q['wire']}: registry={q['default']!r} spec={schema['default']!r}"
+                )
+    assert not drift, "registry query defaults drifted from spec:\n  " + "\n  ".join(drift)
+
+
+async def test_boolean_default_true_is_sent(server, recorder):
+    """A spec-`true` boolean must default to `true`, not the old hardcoded false."""
+    await call(server, "lidarr_list_wanted_missing", page_size=1)
+    assert recorder.params["monitored"] == "true"
+
+
+async def test_boolean_without_spec_default_is_sent_as_false(server, recorder):
+    """A boolean with no spec default keeps `False`.
+
+    Omitting it would be a 400 for `trackfile.unmapped`, which belongs to an
+    undocumented any-one-of group; `false` is accepted and is what an absent
+    non-nullable bool binds to server-side.
+    """
+    await call(server, "lidarr_list_trackfile", artist_id=1)
+    assert recorder.params["unmapped"] == "false"
+
+
+async def test_boolean_with_spec_false_default_still_sent(server, recorder):
+    """Params whose spec default really is false keep being sent explicitly."""
+    await call(server, "lidarr_list_album")
+    assert recorder.params["includeAllArtistAlbums"] == "false"
+
 
 async def test_query_params_use_wire_names(server, recorder):
     await call(server, "lidarr_list_history", page=2, page_size=50, sort_key="date", sort_direction="descending")
