@@ -17,11 +17,13 @@ name. Nothing about the endpoint functions themselves changes - grouping is
 purely a registration-time concern.
 
 Auth is the X-Api-Key header, generated in Lidarr > Settings > General >
-Security. A group tool is marked readOnlyHint=True only when every operation
-in it is a GET; mixed groups carry no hints (writes still get a `WRITE:` /
-`DESTRUCTIVE:` note in their operation's doc line). Bodies are passed as
-opaque dicts/lists. build_client points at the origin with no path suffix so
-httpx joins the fully-qualified paths (including /ping) correctly.
+Security. Annotations are derived per group from the operations it hosts: an
+all-GET group is read-only; otherwise the group carries the pessimistic hint
+for the riskiest operation it can reach (see `_group_annotations`). MCP
+annotations are per-tool, so the exact per-operation classification is also
+published in the tool's `_meta` under `lidarr/operations`. Bodies are passed
+as opaque dicts/lists. build_client points at the origin with no path suffix
+so httpx joins the fully-qualified paths (including /ping) correctly.
 """
 
 import inspect
@@ -36,9 +38,21 @@ from fastmcp.exceptions import ToolError
 from fastmcp.tools import Tool
 from mcp.types import ToolAnnotations
 
-READONLY = ToolAnnotations(readOnlyHint=True)
-WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
-DESTRUCTIVE = ToolAnnotations(readOnlyHint=False, destructiveHint=True)
+# Tool annotations. Every hint is set explicitly, including the ones whose MCP
+# default already matches, so the register is auditable rather than implied.
+# openWorldHint is true throughout: every operation reaches the remote Lidarr
+# HTTP API, and (for search/release/command routes) the indexers behind it.
+# idempotentHint is true only for the read-only set - a GET is safe to repeat;
+# POST/PUT/DELETE are not claimed to be, even where PUT would be in isolation.
+READONLY = ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+)
+WRITE = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
+)
+DESTRUCTIVE = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True
+)
 
 # Lidarr responses are plain JSON. `dict[str, Any]` (not bare `Any`) matters
 # here: FastMCP needs a concrete schema to build MCP structured content, and
@@ -1948,6 +1962,39 @@ def _tool_source(spec: dict[str, Any]) -> str:
     )
 
 
+def _op_risk(method: str) -> str:
+    """Classify one operation by HTTP method: read-only, write or destructive.
+
+    The registry's doc strings already carry the same classification (every
+    DELETE is `DESTRUCTIVE:`, every POST/PUT is `WRITE:`, no non-GET is
+    unmarked); tests/test_tools.py::test_operation_risk_matches_doc_markers
+    pins the two together so either side drifting is caught.
+    """
+    if method == "GET":
+        return "read-only"
+    if method == "DELETE":
+        return "destructive"
+    return "write"
+
+
+def _group_annotations(methods: set[str]) -> ToolAnnotations:
+    """Annotations for a group tool, from the methods it can dispatch to.
+
+    MCP annotations describe a whole tool, but a group fans out to as many as
+    26 operations, so only the riskiest operation the group can reach can be
+    advertised. Being pessimistic is the only safe direction: a client that
+    trusts `destructiveHint=false` may auto-approve the call, so the group
+    claims the least permissive hint that is still true of every operation it
+    hosts. Exact per-operation risks are published separately in the tool's
+    `_meta` (see `_register_group`).
+    """
+    if methods == {"GET"}:
+        return READONLY
+    if "DELETE" in methods:
+        return DESTRUCTIVE
+    return WRITE
+
+
 def _op_line(name: str, fn: Any) -> str:
     """One line of a group tool's description: signature + one-line doc."""
     sig = ", ".join(
@@ -1970,7 +2017,6 @@ def _register_group(group: str, names: tuple[str, ...], ns: dict[str, Any], meth
         return await fn(**(arguments or {}))
 
     dispatch.__annotations__["operation"] = Literal[names]
-    ann = READONLY if {method_of[n] for n in names} == {"GET"} else None
     mcp.add_tool(
         Tool.from_function(
             dispatch,
@@ -1980,7 +2026,15 @@ def _register_group(group: str, names: tuple[str, ...], ns: dict[str, Any], meth
                 f"`arguments` dict matching that operation's parameters.\n\n"
                 + "\n".join(_op_line(n, f) for n, f in fns.items())
             ),
-            annotations=ann,
+            annotations=_group_annotations({method_of[n] for n in names}),
+            # Annotations can only describe the group as a whole, so the exact
+            # per-operation risk is published here for clients that gate calls.
+            meta={
+                "lidarr/operations": {
+                    n: {"method": method_of[n], "risk": _op_risk(method_of[n])}
+                    for n in names
+                }
+            },
         )
     )
 

@@ -91,6 +91,24 @@ Endpoint-level naming (`lidarr_<verb>_<resource>`) is preserved as the
 `operation` value, so the full endpoint list is still discoverable from each
 group tool's description at runtime.
 
+### Annotations
+
+Each group tool carries all four MCP hints, chosen from the operations it can
+dispatch to. Because a group mixes reads and writes, the hints are pessimistic
+— a tool is only advertised as read-only when every operation behind it is a
+GET:
+
+| | `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
+|---|---|---|---|---|
+| all-GET groups (`lidarr_wanted`, `lidarr_calendar`) | `true` | `false` | `true` | `true` |
+| groups with no DELETE | `false` | `false` | `false` | `true` |
+| groups that can DELETE | `false` | `true` | `false` | `true` |
+
+The exact per-operation classification is also published in each tool's
+`_meta` as `lidarr/operations` (`{operation: {method, risk}}`), since a single
+annotation cannot describe 26 operations. Per-operation risk is still in the
+description text too: `WRITE:` for POST/PUT, `DESTRUCTIVE:` for DELETE.
+
 ## Development
 
 ```bash

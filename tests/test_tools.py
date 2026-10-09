@@ -166,6 +166,87 @@ async def test_unknown_operation_rejected_by_schema(server):
             await c.call_tool("lidarr_tags", {"operation": "not_a_real_operation"})
 
 
+# --- tool annotations ----------------------------------------------------------
+
+def test_operation_risk_matches_doc_markers():
+    """`_op_risk` must agree with the WRITE:/DESTRUCTIVE: markers in the docs.
+
+    The annotations are derived from the HTTP method rather than parsed out of
+    the prose, so this pins the two together: if either the method mapping or a
+    doc marker drifts, the mismatch surfaces here instead of silently
+    mislabelling a destructive operation as a plain write.
+    """
+    disagreements = []
+    for spec in lidarr_mcp._TOOL_REGISTRY:
+        doc = spec.get("doc", "")
+        risk = lidarr_mcp._op_risk(spec["method"])
+        if risk == "destructive":
+            marked = "DESTRUCTIVE:" in doc
+        elif risk == "write":
+            marked = "WRITE:" in doc
+        else:
+            marked = "WRITE:" not in doc and "DESTRUCTIVE:" not in doc
+        if not marked:
+            disagreements.append(f"{spec['name']}: method={spec['method']} risk={risk} doc={doc!r}")
+    assert not disagreements, "risk classification disagrees with doc markers:\n  " + "\n  ".join(
+        disagreements
+    )
+
+
+def test_group_annotations_are_pessimistic():
+    """A group's hints must not understate the risk of any operation it hosts."""
+    method_of = {spec["name"]: spec["method"] for spec in lidarr_mcp._TOOL_REGISTRY}
+    for group, names in lidarr_mcp._GROUPS.items():
+        methods = {method_of[n] for n in names}
+        ann = lidarr_mcp._group_annotations(methods)
+        assert ann is not None, f"{group} carries no annotations"
+        expected_readonly = methods == {"GET"}
+        expected_destructive = not expected_readonly and "DELETE" in methods
+        assert ann.readOnlyHint is expected_readonly, group
+        assert ann.destructiveHint is expected_destructive, group
+        # Deletes exist, so repetition is never safe to advertise.
+        assert ann.idempotentHint is expected_readonly, group
+        # Every operation reaches the remote API.
+        assert ann.openWorldHint is True, group
+        assert ann.readOnlyHint is False or ann.destructiveHint is False, group
+
+
+async def test_group_tools_publish_annotations_and_operation_meta(server):
+    """Every group tool exposes all four hints and the per-operation map."""
+    method_of = {spec["name"]: spec["method"] for spec in lidarr_mcp._TOOL_REGISTRY}
+    async with Client(server) as c:
+        tools = {t.name: t for t in await c.list_tools()}
+    for group, names in lidarr_mcp._GROUPS.items():
+        tool = tools[group]
+        ann = tool.annotations
+        assert ann is not None, group
+        # All four hints set explicitly, never left to the MCP defaults.
+        dumped = ann.model_dump(exclude_none=True)
+        assert set(dumped) == {"readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"}, (
+            group,
+            dumped,
+        )
+        ops = (tool.meta or {}).get("lidarr/operations")
+        assert ops is not None, f"{group} has no per-operation meta"
+        assert set(ops) == set(names), group
+        for name, entry in ops.items():
+            assert entry["method"] == method_of[name], name
+            assert entry["risk"] == lidarr_mcp._op_risk(method_of[name]), name
+
+
+async def test_destructive_operation_is_reachable_only_from_destructive_group(server):
+    """Sanity check the wiring: a DELETE lives in a group flagged destructive."""
+    async with Client(server) as c:
+        tools = {t.name: t for t in await c.list_tools()}
+    group_of = {n: g for g, names in lidarr_mcp._GROUPS.items() for n in names}
+    for spec in lidarr_mcp._TOOL_REGISTRY:
+        if spec["method"] != "DELETE":
+            continue
+        tool = tools[group_of[spec["name"]]]
+        assert tool.annotations.destructiveHint is True, spec["name"]
+        assert tool.annotations.readOnlyHint is False, spec["name"]
+
+
 # --- query params --------------------------------------------------------------
 
 def spec_query_defaults():

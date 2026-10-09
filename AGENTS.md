@@ -32,9 +32,11 @@ Exposed as **15 resource-scoped portmanteau tools**, not one tool per endpoint �
 - Library resources are Artist/Album/Track/TrackFile (no Series/Episode/Movie). `rename` and `retag` are GET previews; the actual file writes go through `lidarr_run_command` (RenameTracks/RetagTags commands).
 
 ## Annotations convention
-- A group tool is `readOnlyHint=True` (`READONLY`) only when *every* operation in it is a GET (e.g. `lidarr_wanted`, `lidarr_calendar`). Mixed groups carry no hints.
-- Per-operation write/destructive notes survive in the group tool's description: each operation line still ends with its original one-line doc, and destructive/write endpoints keep a `WRITE:`/`DESTRUCTIVE:` note in that doc string (see `_TOOL_REGISTRY`'s `doc` field).
-- `READONLY`/`WRITE`/`DESTRUCTIVE` constants are kept for reference and for any future per-operation annotation work, but only `READONLY` is actually applied today (to all-GET groups).
+- Every group tool carries all four MCP hints, chosen by `_group_annotations()` from the HTTP methods the group can dispatch to, and derived per operation by `_op_risk()` (GET → `read-only`, DELETE → `destructive`, POST/PUT → `write`).
+- Hints are deliberately **pessimistic**, because MCP annotations describe a whole tool while a group fans out to as many as 26 operations, only one of which the caller picks at call time. `readOnlyHint=True` only for all-GET groups; `destructiveHint=True` for any group that can reach a DELETE; `idempotentHint=True` only for the read-only set (repeating a create/update/delete is never claimed safe); `openWorldHint=True` always (every operation reaches the remote API).
+- Because annotations can't be per-operation, the exact classification is also published in each tool's `_meta` as `lidarr/operations` = `{op: {method, risk}}`. Clients that gate calls can consult it; nothing in Pi currently does.
+- Never relax a hint in the permissive direction to make a group look tidier. A client that trusts `destructiveHint=false` may auto-approve, so a group must claim the least permissive hint true of everything it hosts.
+- `_op_risk()` classifies from the HTTP method, not from the doc prose. `test_operation_risk_matches_doc_markers` pins the two together, so a method mapping or a `WRITE:`/`DESTRUCTIVE:` marker drifting is caught offline. The markers stay in the doc strings for the model's benefit.
 
 ## Auth and base path
 - Auth: `X-Api-Key` header (generate in Lidarr Settings > General > Security). Not bearer.
